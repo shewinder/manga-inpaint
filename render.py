@@ -141,9 +141,18 @@ def fit_font_size(
         line_h = int((ascent + descent) * 1.15)
 
         if direction == "vertical":
-            th = line_h * (len(text) - 1) + draw.textbbox((0, 0), text[0] if text else " ", font=font, anchor="lt")[3]
             cws = [draw.textbbox((0, 0), c, font=font, anchor="lt")[2] for c in text]
             tw = max(cws) if cws else 0
+            one_col_h = line_h * len(text)
+            if one_col_h <= avail_h:
+                # 单列能放下
+                th = one_col_h + (draw.textbbox((0, 0), text[0] if text else " ", font=font, anchor="lt")[3] - line_h)
+            else:
+                # 需要多列：列数 = ceil(total_h / avail_h)
+                chars_per_col = max(1, avail_h // line_h)
+                num_cols = (len(text) + chars_per_col - 1) // chars_per_col
+                th = avail_h
+                tw = num_cols * tw + (num_cols - 1) * 8  # 8px 列间距
         else:
             lines = _wrap_text(draw, text, font, avail_w)
             lws = []
@@ -176,9 +185,11 @@ def draw_vertical_text(
     outline_width: int,
     outline_fill: Tuple[int, int, int],
     max_h: int = 0,
+    max_w: int = 0,
     line_spacing: float = 1.15,
+    col_gap: int = 8,
 ):
-    """逐字绘制竖排文字，lt 锚点，从上到下"""
+    """逐字绘制竖排文字，lt 锚点，从上到下。高度溢出时自动拆多列"""
     x0, y0 = top_left
     ascent, descent = font.getmetrics()
     char_step = int((ascent + descent) * line_spacing)
@@ -187,26 +198,51 @@ def draw_vertical_text(
     char_sizes = []
     for c in text:
         b = draw.textbbox((0, 0), c, font=font, anchor="lt")
-        char_sizes.append((b[2], b[3]))  # w, h
+        char_sizes.append((b[2], b[3]))
 
-    total_h = char_step * (len(text) - 1) + (char_sizes[-1][1] if char_sizes else char_step)
-    max_cw = max(s[0] for s in char_sizes) if char_sizes else 0
+    if not char_sizes:
+        return
+    char_w = max(s[0] for s in char_sizes)
 
-    # 垂直居中
-    if max_h and total_h < max_h:
-        y0 += (max_h - total_h) // 2
+    # 计算需要多少列
+    one_col_h = char_step * len(text)
+    if max_h and one_col_h > max_h:
+        col_h = max_h
+        chars_per_col = max(1, max_h // char_step)
+        num_cols = (len(text) + chars_per_col - 1) // chars_per_col
+    else:
+        col_h = one_col_h
+        chars_per_col = len(text)
+        num_cols = 1
 
-    cy = y0
-    for i, char in enumerate(text):
-        cw, ch = char_sizes[i]
-        cx = x0 + (max_cw - cw) // 2
+    total_w = num_cols * char_w + (num_cols - 1) * col_gap
 
-        if outline_width > 0:
-            _draw_outlined_text(draw, char, font, cx, cy, fill,
-                                outline_width, outline_fill, anchor="lt")
-        else:
-            draw.text((cx, cy), char, font=font, fill=fill, anchor="lt")
-        cy += char_step
+    # 水平居中（多列时从右到左排列）
+    if max_w and total_w < max_w:
+        x0 += (max_w - total_w) // 2
+
+    for col in range(num_cols):
+        start_idx = col * chars_per_col
+        col_text = text[start_idx:start_idx + chars_per_col]
+
+        # 日文竖排从右到左：最后一列在最右边
+        col_x = x0 + (num_cols - 1 - col) * (char_w + col_gap)
+
+        # 垂直居中
+        col_total_h = char_step * (len(col_text) - 1) + (char_sizes[min(start_idx, len(char_sizes)-1)][1])
+        cy = y0 + (col_h - col_total_h) // 2 if max_h else y0
+
+        for j, char in enumerate(col_text):
+            idx = start_idx + j
+            cw = char_sizes[idx][0]
+            cx = col_x + (char_w - cw) // 2
+
+            if outline_width > 0:
+                _draw_outlined_text(draw, char, font, cx, cy, fill,
+                                    outline_width, outline_fill, anchor="lt")
+            else:
+                draw.text((cx, cy), char, font=font, fill=fill, anchor="lt")
+            cy += char_step
 
 
 def draw_horizontal_text(
@@ -467,7 +503,7 @@ def render(
         if direction == "vertical":
             draw_vertical_text(draw, (x0, y0), trans.text,
                                 font, fill_rgb, outline_width, outline_rgb,
-                                max_h=union_h)
+                                max_h=union_h, max_w=union_w)
         else:
             draw_horizontal_text(draw, (x0, y0),
                                   (union_w, union_h), trans.text,
