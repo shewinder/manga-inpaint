@@ -1,0 +1,41 @@
+[project]
+name = "manga-inpaint"
+version = "0.1.0"
+description = "漫画文字检测 + 擦除 GPU 服务"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pillow>=10",
+    "numpy>=1.26",
+    "craft-text-detector==0.4.3",
+    "simple-lama-inpainting==0.1.2",
+    "opencv-python-headless>=4.8",
+    "python-multipart>=0.0.9",
+    "gdown>=5.0",
+    "torch>=2.4",
+    "torchvision>=0.19",
+]
+
+[tool.uv]
+# craft-text-detector 0.4.3 要求 opencv-python<4.5.4.62，但
+# simple-lama-inpainting 0.1.2 需要 >=4.8.0.74。强制统一用新版。
+# simple-lama-inpainting 要求 pillow<10，但 pillow>=10 有预编译 wheel。
+override-dependencies = [
+    "opencv-python>=4.8",
+    "pillow>=10",
+]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+
+# 阿里云 PyPI 镜像（默认）
+[[tool.uv.index]]
+name = "aliyun"
+url = "https://mirrors.aliyun.com/pypi/simple/"
+default = true

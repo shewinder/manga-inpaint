@@ -1,0 +1,14 @@
+services:
+  manga-inpaint:
+    build: .
+    image: manga-inpaint:latest
+    ports:
+      - "8899:8899"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
