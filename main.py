@@ -60,6 +60,24 @@ LAMA_MODEL_PATH = str(MODEL_DIR / "lama" / "big-lama.pt")
 MANGA_OCR_PATH = str(MODEL_DIR / "manga-ocr-flat")
 
 
+# ---- 会话数据缓存 ----
+# 用 data_id 索引，避免 AI 手动管理 bbox 文件
+import uuid
+_session_store: dict = {}  # {data_id: {bboxes, results, image_path, ...}}
+
+
+def _save_session(**kwargs) -> str:
+    data_id = uuid.uuid4().hex[:12]
+    _session_store[data_id] = kwargs
+    return data_id
+
+
+def _get_session(data_id: str) -> dict:
+    if data_id not in _session_store:
+        raise HTTPException(404, f"data_id 不存在或已过期: {data_id}")
+    return _session_store[data_id]
+
+
 # ---- 数据模型 ----
 class BboxOut(BaseModel):
     id: int
@@ -275,6 +293,7 @@ async def inpaint_and_render(
     file: UploadFile = File(...),
     translations: str = Form(""),
     bboxes: str = Form(""),
+    data_id: str = Form(""),
     font_dir: str = Form(""),
 ):
     """擦除指定 bbox 并嵌字"""
@@ -308,17 +327,20 @@ async def inpaint_and_render(
         for bid in ids:
             all_erase_ids.add(bid)
 
-    # 3. 解析传入的 bbox（允许带坐标，避免重复检测）
-    if bboxes.strip():
+    # 3. 获取 bbox：优先 data_id，其次 bboxes，最后自动检测
+    if data_id.strip():
+        session = _get_session(data_id)
+        all_bboxes = session["bboxes"]
+        logger.info(f"使用缓存 {data_id}: {len(all_bboxes)} 区域")
+    elif bboxes.strip():
         parsed = json.loads(bboxes)
-        # 兼容：纯数组、detect返回{"bboxes":[...]}、ocr返回{"results":[...]}
         if isinstance(parsed, dict):
             if "bboxes" in parsed:
                 all_bboxes = parsed["bboxes"]
             elif "results" in parsed:
                 all_bboxes = parsed["results"]
             else:
-                raise HTTPException(400, "bboxes 格式错误，需要数组或包含 bboxes/results 的对象")
+                raise HTTPException(400, "bboxes 格式错误")
         elif isinstance(parsed, list):
             all_bboxes = parsed
         else:
@@ -408,7 +430,8 @@ async def ocr_bboxes(
             "polygon": b.get("polygon", []),
         })
 
-    return {"status": "ok", "results": results}
+    data_id = _save_session(bboxes=bbox_list, results=results)
+    return {"status": "ok", "results": results, "data_id": data_id}
 
 
 @app.get("/health")
