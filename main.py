@@ -6,6 +6,7 @@ POST /inpaint_and_render  擦除 + 嵌字 → 结果图片
 """
 import io
 import os
+import json
 import base64
 import logging
 from pathlib import Path
@@ -42,6 +43,7 @@ def _compat_array(obj, *args, **kwargs):
 craft_net = None
 refine_net = None
 lama_model = None
+manga_ocr = None
 
 # ---- 配置 ----
 CONFIDENCE_THRESHOLD = 0.7
@@ -55,6 +57,7 @@ MODEL_DIR = BASE_DIR / "models"
 CRAFT_WEIGHT_PATH = str(MODEL_DIR / "craft" / "craft_mlt_25k.pth")
 REFINER_WEIGHT_PATH = str(MODEL_DIR / "craft" / "craft_refiner_CTW1500.pth")
 LAMA_MODEL_PATH = str(MODEL_DIR / "lama" / "big-lama.pt")
+MANGA_OCR_PATH = str(MODEL_DIR / "manga-ocr-flat")
 
 
 # ---- 数据模型 ----
@@ -93,6 +96,20 @@ class InpaintAndRenderResponse(BaseModel):
 
 # ---- 核心函数 ----
 
+def _ensure_file(url: str, dst: str, desc: str = ""):
+    if os.path.exists(dst):
+        return
+    logger.info(f"下载 {desc}: {dst}")
+    import httpx
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    with httpx.stream("GET", url, follow_redirects=True, timeout=600) as r:
+        r.raise_for_status()
+        with open(dst, "wb") as f:
+            for chunk in r.iter_bytes():
+                f.write(chunk)
+    logger.info(f"{desc} 下载完成")
+
+
 def load_craft():
     global craft_net, refine_net
     if craft_net is None:
@@ -101,6 +118,14 @@ def load_craft():
             vgg.model_urls = {
                 "vgg16_bn": "https://download.pytorch.org/models/vgg16_bn-6c64b313.pth",
             }
+
+        _ensure_file(
+            "https://hf-mirror.com/Manbehindthemadness/craft_mlt_25k/resolve/main/craft_mlt_25k.pth",
+            CRAFT_WEIGHT_PATH, "CRAFT检测")
+        _ensure_file(
+            "https://hf-mirror.com/Manbehindthemadness/craft_mlt_25k/resolve/main/craft_refiner_CTW1500.pth",
+            REFINER_WEIGHT_PATH, "CRAFT精炼")
+
         np.array = _compat_array
         try:
             from craft_text_detector import load_craftnet_model, load_refinenet_model
@@ -115,11 +140,30 @@ def load_craft():
 def load_lama():
     global lama_model
     if lama_model is None:
+        _ensure_file(
+            "https://github.com/enesmsahin/simple-lama-inpainting/releases/download/v0.1.0/big-lama.pt",
+            LAMA_MODEL_PATH, "LaMa擦除")
         logger.info("加载 LaMa 模型...")
         os.environ["LAMA_MODEL"] = LAMA_MODEL_PATH
         from simple_lama_inpainting import SimpleLama
         lama_model = SimpleLama()
         logger.info("LaMa 模型加载完成")
+
+
+def load_ocr():
+    global manga_ocr
+    if manga_ocr is None:
+        if not os.path.exists(MANGA_OCR_PATH):
+            logger.info(f"下载 manga-ocr 模型到 {MANGA_OCR_PATH}...")
+            os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+            from huggingface_hub import snapshot_download
+            snapshot_download("kha-white/manga-ocr-base", local_dir=MANGA_OCR_PATH)
+            logger.info("manga-ocr 模型下载完成")
+        logger.info("加载 manga-ocr 模型...")
+        os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+        from manga_ocr import MangaOcr
+        manga_ocr = MangaOcr(pretrained_model_name_or_path=MANGA_OCR_PATH)
+        logger.info("manga-ocr 模型加载完成")
 
 
 def create_mask(image_shape: tuple, bboxes: list, dilation: int = MASK_DILATION) -> np.ndarray:
@@ -267,15 +311,24 @@ async def inpaint_and_render(
     # 3. 解析传入的 bbox（允许带坐标，避免重复检测）
     if bboxes.strip():
         parsed = json.loads(bboxes)
-        # 兼容两种格式：纯数组 或 detect 返回的 {"success":true, "bboxes":[...]}
-        if isinstance(parsed, dict) and "bboxes" in parsed:
-            all_bboxes = parsed["bboxes"]
+        # 兼容：纯数组、detect返回{"bboxes":[...]}、ocr返回{"results":[...]}
+        if isinstance(parsed, dict):
+            if "bboxes" in parsed:
+                all_bboxes = parsed["bboxes"]
+            elif "results" in parsed:
+                all_bboxes = parsed["results"]
+            else:
+                raise HTTPException(400, "bboxes 格式错误，需要数组或包含 bboxes/results 的对象")
         elif isinstance(parsed, list):
             all_bboxes = parsed
         else:
-            raise HTTPException(400, "bboxes 格式错误，需要数组或 {bboxes:[...]}")
+            raise HTTPException(400, "bboxes 格式错误")
     else:
         all_bboxes = detect_text(img_array)
+    # 统一 bbox 键名：OCR 返回 bbox_id，CRAFT 返回 id
+    for b in all_bboxes:
+        if "bbox_id" in b and "id" not in b:
+            b["id"] = b["bbox_id"]
     bbox_map = {b["id"]: b for b in all_bboxes}
 
     # 4. 只擦除翻译中引用的 bbox
@@ -291,7 +344,12 @@ async def inpaint_and_render(
     output_path = "/tmp/_rendered_temp.png"
     Image.fromarray(img_array).save(inpainted_path)
 
-    render_bboxes = [RenderBbox(**b) for b in all_bboxes]
+    # 只传 Bbox 需要的字段
+    render_bboxes = [RenderBbox(
+        id=b.get("id", b.get("bbox_id", 0)),
+        x=b["x"], y=b["y"], w=b["w"], h=b["h"],
+        polygon=b.get("polygon", []),
+    ) for b in all_bboxes]
     do_render(inpainted_path, render_bboxes, translations_obj, output_path, fd)
 
     # 6. 返回
@@ -299,6 +357,58 @@ async def inpaint_and_render(
         result_b64 = base64.b64encode(f.read()).decode()
 
     return InpaintAndRenderResponse(rendered_image=result_b64)
+
+
+@app.post("/ocr")
+async def ocr_bboxes(
+    file: UploadFile = File(...),
+    bboxes: str = Form(""),
+):
+    """对指定 bbox 区域做 OCR，返回精确文字"""
+    if file.content_type and not file.content_type.startswith("image/"):
+        raise HTTPException(400, "仅支持图片文件")
+    try:
+        contents = await file.read()
+        image = Image.open(io.BytesIO(contents)).convert("RGB")
+    except Exception as e:
+        raise HTTPException(400, f"无法读取图片: {e}")
+
+    # 解析 bbox 或自动检测
+    if bboxes.strip():
+        parsed = json.loads(bboxes)
+        if isinstance(parsed, dict) and "bboxes" in parsed:
+            bbox_list = parsed["bboxes"]
+        elif isinstance(parsed, list):
+            bbox_list = parsed
+        else:
+            raise HTTPException(400, "bboxes 格式错误")
+    else:
+        bbox_list = detect_text(np.array(image))
+
+    load_ocr()
+    results = []
+    for b in bbox_list:
+        x, y, w, h = b["x"], b["y"], b["w"], b["h"]
+        # 留少许边距避免裁到文字边缘
+        pad = 4
+        crop = image.crop((
+            max(0, x - pad),
+            max(0, y - pad),
+            min(image.width, x + w + pad),
+            min(image.height, y + h + pad),
+        ))
+        try:
+            text = manga_ocr(crop)
+        except Exception as e:
+            text = f"[OCR ERROR: {e}]"
+        results.append({
+            "bbox_id": b["id"],
+            "text": text.strip(),
+            "x": b["x"], "y": b["y"], "w": b["w"], "h": b["h"],
+            "polygon": b.get("polygon", []),
+        })
+
+    return {"status": "ok", "results": results}
 
 
 @app.get("/health")
