@@ -6,4 +6,7 @@ test_*.png
 test/*_*.png
 *.pth
 *.pt
+*.safetensors
+*.bin
+models/
 fonts/
