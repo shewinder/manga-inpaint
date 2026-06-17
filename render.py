@@ -13,13 +13,7 @@ from typing import List, Optional, Tuple
 from PIL import Image, ImageDraw, ImageFont
 
 # 字体映射 — AI 传入字体代号，脚本匹配实际文件
-FONT_MAP = {
-    "sans": "simhei.ttf",
-    "heiti": "msyh.ttc",   # 微软雅黑，符号(♡♪★等)渲染更好
-    "serif": "simsun.ttc",
-    "bold": "msyh.ttc",
-}
-DEFAULT_FONT = "sans"
+FONT_FILE = "simhei.ttf"
 
 
 @dataclass
@@ -35,13 +29,10 @@ class Bbox:
 @dataclass
 class Translation:
     text: str
-    font: str = "sans"
     color: str = "#000000"
-    direction: str = "auto"  # horizontal | vertical | auto
-    outline: bool = True
-    outline_color: str = "#ffffff"
-    bbox_id: int = 0  # 主 bbox，单框时必填
-    bbox_ids: Optional[List[int]] = None  # 覆盖多个 bbox 时指定全部 id
+    direction: str = "auto"
+    bbox_id: int = 0
+    bbox_ids: Optional[List[int]] = None
 
 
 def load_translations(data: list) -> List[Translation]:
@@ -53,31 +44,18 @@ def load_bboxes(data: list) -> List[Bbox]:
 
 
 def find_font(font_dir: Path, name: str) -> Optional[Path]:
-    """查找 ttf/otf 字体文件，支持模糊匹配"""
+    """查找字体文件"""
     if not font_dir.is_dir():
         return None
-    for f in sorted(font_dir.iterdir()):
-        fname = f.name.lower()
-        if name.lower() in fname and f.suffix.lower() in (".ttf", ".otf", ".ttc"):
-            return f
-    return None
+    path = font_dir / name
+    return path if path.exists() else None
 
 
-def load_font(font_dir: Path, size: int, font_name: str = "sans") -> ImageFont.FreeTypeFont:
-    """加载字体，找不到则 fallback 到 default"""
-    key = FONT_MAP.get(font_name, FONT_MAP[DEFAULT_FONT])
-    path = find_font(font_dir, key)
+def load_font(font_dir: Path, size: int) -> ImageFont.FreeTypeFont:
+    """加载 simhei 字体"""
+    path = find_font(font_dir, FONT_FILE)
     if path:
         return ImageFont.truetype(str(path), size)
-    # 尝试系统字体
-    fallbacks = [
-        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/noto-cjk/NotoSansCJKsc-Regular.otf",
-    ]
-    for fb in fallbacks:
-        if Path(fb).exists():
-            return ImageFont.truetype(fb, size)
-    # 最后兜底：Pillow 默认字体
     return ImageFont.load_default()
 
 
@@ -124,7 +102,6 @@ def fit_font_size(
     max_w: int,
     max_h: int,
     font_dir: Path,
-    font_name: str,
     direction: str,
     padding: int = 4,
 ) -> int:
@@ -136,7 +113,7 @@ def fit_font_size(
 
     for _ in range(20):
         mid = (lo + hi) // 2
-        font = load_font(font_dir, mid, font_name)
+        font = load_font(font_dir, mid)
         ascent, descent = font.getmetrics()
         line_h = int((ascent + descent) * 1.15)
 
@@ -184,8 +161,6 @@ def draw_vertical_text(
     text: str,
     font: ImageFont.FreeTypeFont,
     fill: Tuple[int, int, int],
-    outline_width: int,
-    outline_fill: Tuple[int, int, int],
     max_h: int = 0,
     max_w: int = 0,
     line_spacing: float = 1.15,
@@ -255,11 +230,7 @@ def draw_vertical_text(
             cw = char_sizes[flat_idx][0] if flat_idx < len(char_sizes) else char_w
             cx = col_x + (char_w - cw) // 2
 
-            if outline_width > 0:
-                _draw_outlined_text(draw, char, font, cx, cy, fill,
-                                    outline_width, outline_fill, anchor="lt")
-            else:
-                draw.text((cx, cy), char, font=font, fill=fill, anchor="lt")
+            draw.text((cx, cy), char, font=font, fill=fill, anchor="lt")
             cy += char_step
 
 
@@ -270,8 +241,6 @@ def draw_horizontal_text(
     text: str,
     font: ImageFont.FreeTypeFont,
     fill: Tuple[int, int, int],
-    outline_width: int,
-    outline_fill: Tuple[int, int, int],
     rotation: float = 0.0,
     padding: int = 4,
 ):
@@ -302,8 +271,8 @@ def draw_horizontal_text(
         rotation = 0.0
 
     if abs(rotation) > 0.5:
-        _draw_horizontal_rotated(draw, lines, font, fill, outline_width,
-                                  outline_fill, x0, y0, mw + padding * 2,
+        _draw_horizontal_rotated(draw, lines, font, fill,
+                                  x0, y0, mw + padding * 2,
                                   mh + padding * 2, rotation,
                                   start_y, total_w, total_h)
     else:
@@ -311,11 +280,7 @@ def draw_horizontal_text(
         for i, line in enumerate(lines):
             lw, lh = line_metrics[i]
             cx = x0 + (mw - lw) // 2
-            if outline_width > 0:
-                _draw_outlined_text(draw, line, font, cx, cy, fill,
-                                     outline_width, outline_fill, anchor="lt")
-            else:
-                draw.text((cx, cy), line, font=font, fill=fill, anchor="lt")
+            draw.text((cx, cy), line, font=font, fill=fill, anchor="lt")
             cy += line_step
 
 
@@ -337,13 +302,7 @@ def _wrap_text(draw, text: str, font, max_w: int) -> List[str]:
     return lines or [text]
 
 
-def _draw_outlined_text(draw, text, font, x, y, fill, ow, ofill, anchor="lt"):
-    """描边文字 — 使用 Pillow 原生 stroke"""
-    draw.text((x, y), text, font=font, fill=fill,
-              stroke_width=ow, stroke_fill=ofill, anchor=anchor)
-
-
-def _draw_horizontal_rotated(draw, lines, font, fill, ow, ofill,
+def _draw_horizontal_rotated(draw, lines, font, fill,
                                x0, y0, mw, mh, angle, start_y, tw, th):
     """在旋转画布上绘制横排文字"""
     import numpy as np
@@ -358,102 +317,12 @@ def _draw_horizontal_rotated(draw, lines, font, fill, ow, ofill,
         line_bbox = txt_draw.textbbox((0, 0), line, font=font, anchor="lt")
         lw = line_bbox[2]
         cx = (mw - lw) // 2
-        if ow > 0:
-            _draw_outlined_text(txt_draw, line, font, cx, cy,
-                                fill + (255,), ow, ofill + (255,), anchor="lt")
-        else:
-            txt_draw.text((cx, cy), line, font=font, fill=fill + (255,), anchor="lt")
+        txt_draw.text((cx, cy), line, font=font, fill=fill + (255,), anchor="lt")
         cy += txt_draw.textbbox((0, 0), line, font=font, anchor="lt")[3]
 
     # 旋转并粘贴
     rotated = txt_img.rotate(-angle, expand=False, resample=PILImage.BICUBIC)
     draw._image.paste(rotated, (x0, y0), rotated)
-
-
-def merge_overlapping_bboxes(
-    bboxes: List[Bbox],
-    translations: List[Translation],
-    overlap_ratio: float = 0.2,
-) -> Tuple[List[Bbox], List[Translation]]:
-    """合并重叠面积大于阈值的相邻 bbox"""
-    n = len(bboxes)
-    parent = list(range(n))
-
-    def find(x):
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-
-    def union(a, b):
-        pa, pb = find(a), find(b)
-        if pa != pb:
-            parent[pa] = pb
-
-    # 检测重叠并合并
-    for i in range(n):
-        for j in range(i + 1, n):
-            bi, bj = bboxes[i], bboxes[j]
-            ox = max(0, min(bi.x + bi.w, bj.x + bj.w) - max(bi.x, bj.x))
-            oy = max(0, min(bi.y + bi.h, bj.y + bj.h) - max(bi.y, bj.y))
-            if ox > 0 and oy > 0:
-                area_i, area_j = bi.w * bi.h, bj.w * bj.h
-                overlap_area = ox * oy
-                if overlap_area > min(area_i, area_j) * overlap_ratio:
-                    union(i, j)
-
-    # 按组聚合
-    groups: dict[int, list] = {}
-    for i in range(n):
-        root = find(i)
-        groups.setdefault(root, []).append(i)
-
-    if len(groups) == n:
-        return bboxes, translations  # 无合并
-
-    # 生成合并后的 bbox 和 translation
-    trans_map = {t.bbox_id: t for t in translations}
-    new_bboxes = []
-    new_translations = []
-
-    for indices in groups.values():
-        if len(indices) == 1:
-            i = indices[0]
-            new_bboxes.append(bboxes[i])
-            if i in trans_map:
-                new_translations.append(trans_map[i])
-        else:
-            # 合并 bbox：取包围盒
-            merged = Bbox(
-                id=bboxes[indices[0]].id,
-                x=min(bboxes[i].x for i in indices),
-                y=min(bboxes[i].y for i in indices),
-                w=max(bboxes[i].x + bboxes[i].w for i in indices) - min(bboxes[i].x for i in indices),
-                h=max(bboxes[i].y + bboxes[i].h for i in indices) - min(bboxes[i].y for i in indices),
-                polygon=[],
-            )
-            new_bboxes.append(merged)
-
-            # 合并翻译文本
-            texts = []
-            for i in sorted(indices):
-                if i in trans_map:
-                    texts.append(trans_map[i].text)
-            merged_text = "".join(texts)
-            base_trans = trans_map.get(indices[0], translations[0])
-            new_translations.append(Translation(
-                bbox_id=merged.id,
-                text=merged_text,
-                font=base_trans.font,
-                color=base_trans.color,
-                direction=base_trans.direction,
-                outline=base_trans.outline,
-                outline_color=base_trans.outline_color,
-            ))
-
-    print(f"  bbox 合并: {len(bboxes)} → {len(new_bboxes)} (合并了 {len(bboxes)-len(new_bboxes)} 组)")
-    return new_bboxes, new_translations
-
 
 def render(
     inpainted_path: str,
@@ -465,66 +334,45 @@ def render(
     img = Image.open(inpainted_path).convert("RGBA")
     draw = ImageDraw.Draw(img)
 
-    # 建立 bbox_id → bbox 索引
     bbox_map = {b.id: b for b in bboxes}
-    rendered_bboxes: set = set()  # 已渲染的 bbox，避免重复
+    rendered_bboxes: set = set()
 
     for trans in translations:
-        # 确定覆盖的 bbox 列表，排除已被前序 translation 渲染的
         bbox_ids = trans.bbox_ids if trans.bbox_ids else [trans.bbox_id]
         bbox_ids = [i for i in bbox_ids if i not in rendered_bboxes]
-        # 确定覆盖的 bbox 列表
-        bbox_ids = trans.bbox_ids if trans.bbox_ids else [trans.bbox_id]
         matched = [bbox_map[i] for i in bbox_ids if i in bbox_map]
 
         if not matched:
             print(f"  ⚠ bbox_ids={bbox_ids} 均不存在，跳过")
             continue
 
-        # 取所有匹配 bbox 的并集作为渲染区域
         x0 = min(b.x for b in matched)
         y0 = min(b.y for b in matched)
         x1 = max(b.x + b.w for b in matched)
         y1 = max(b.y + b.h for b in matched)
         union_w = x1 - x0
         union_h = y1 - y0
-        union_poly = matched[0].polygon  # 方向判断用第一个
 
-        # 确定文字方向
         direction = trans.direction
         if direction == "auto":
-            direction = determine_direction(union_poly)
+            direction = determine_direction(matched[0].polygon)
 
-        # 计算旋转角
-        angle = calculate_angle(union_poly)
+        angle = calculate_angle(matched[0].polygon)
 
-        # 找最佳字号
-        font_size = fit_font_size(draw, trans.text, union_w, union_h,
-                                   font_dir, trans.font, direction)
-        font = load_font(font_dir, font_size, trans.font)
-
-        # 颜色
+        font_size = fit_font_size(draw, trans.text, union_w, union_h, font_dir, direction)
+        font = load_font(font_dir, font_size)
         fill_rgb = hex_to_rgb(trans.color)
-        outline_width = max(1, font_size // 15) if trans.outline else 0
-        outline_rgb = hex_to_rgb(trans.outline_color)
 
         ids_str = f"bboxes={bbox_ids}" if len(bbox_ids) > 1 else f"bbox_id={trans.bbox_id}"
-        print(f"  [{ids_str}] \"{trans.text[:15]}...\" "
-              f"{direction} {union_w}x{union_h} size={font_size} color={trans.color}")
+        print(f"  [{ids_str}] \"{trans.text[:15]}...\" {direction} {union_w}x{union_h} size={font_size} color={trans.color}")
 
         rendered_bboxes.update(bbox_ids)
 
         if direction == "vertical":
-            draw_vertical_text(draw, (x0, y0), trans.text,
-                                font, fill_rgb, outline_width, outline_rgb,
-                                max_h=union_h, max_w=union_w)
+            draw_vertical_text(draw, (x0, y0), trans.text, font, fill_rgb, max_h=union_h, max_w=union_w)
         else:
-            draw_horizontal_text(draw, (x0, y0),
-                                  (union_w, union_h), trans.text,
-                                  font, fill_rgb, outline_width,
-                                  outline_rgb, angle)
+            draw_horizontal_text(draw, (x0, y0), (union_w, union_h), trans.text, font, fill_rgb, angle)
 
-    # 保存
     img.convert("RGB").save(output_path, "PNG")
     print(f"  → 保存: {output_path}")
 
@@ -532,26 +380,17 @@ def render(
 def main():
     parser = argparse.ArgumentParser(description="漫画文字嵌字渲染")
     parser.add_argument("--inpainted", required=True, help="擦除后的图片路径")
-    parser.add_argument("--bboxes", required=True,
-                        help="bbox 列表 JSON (来自 GPU 服务)")
-    parser.add_argument("--translations", required=True,
-                        help="翻译数据 JSON (包含渲染参数)")
+    parser.add_argument("--bboxes", required=True, help="bbox 列表 JSON")
+    parser.add_argument("--translations", required=True, help="翻译数据 JSON")
     parser.add_argument("--output", required=True, help="输出图片路径")
-    parser.add_argument("--font-dir", default="fonts",
-                        help="字体目录 (默认: fonts/)")
+    parser.add_argument("--font-dir", default="fonts", help="字体目录")
     args = parser.parse_args()
 
     bboxes = load_bboxes(json.loads(args.bboxes))
     translations = load_translations(json.loads(args.translations))
-    font_dir = Path(args.font_dir)
-
-    if not font_dir.is_dir():
-        print(f"字体目录不存在: {font_dir}")
-        print("请创建 fonts/ 目录并放入中文字体文件（如 思源黑体）")
-        sys.exit(1)
-
-    render(args.inpainted, bboxes, translations, args.output, font_dir)
+    render(args.inpainted, bboxes, translations, args.output, Path(args.font_dir))
 
 
 if __name__ == "__main__":
     main()
+

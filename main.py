@@ -95,11 +95,8 @@ class DetectResponse(BaseModel):
 class TranslationIn(BaseModel):
     bbox_id: int = 0
     text: str
-    font: str = "sans"
     color: str = "#000000"
     direction: str = "auto"
-    outline: bool = True
-    outline_color: str = "#ffffff"
     bbox_ids: Optional[List[int]] = None
 
 
