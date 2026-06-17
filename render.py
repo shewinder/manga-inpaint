@@ -126,7 +126,7 @@ def fit_font_size(
     font_dir: Path,
     font_name: str,
     direction: str,
-    padding: int = 8,
+    padding: int = 4,
 ) -> int:
     """二分查找最大可用字号，测量与实际渲染逻辑一致"""
     avail_w = max_w - padding * 2
@@ -141,9 +141,11 @@ def fit_font_size(
         line_h = int((ascent + descent) * 1.15)
 
         if direction == "vertical":
-            cws = [draw.textbbox((0, 0), c, font=font, anchor="lt")[2] for c in text]
+            # 逐字测量时跳过换行符
+            chars = [c for c in text if c != "\n"]
+            cws = [draw.textbbox((0, 0), c, font=font, anchor="lt")[2] for c in chars] if chars else [0]
             tw = max(cws) if cws else 0
-            one_col_h = line_h * len(text)
+            one_col_h = line_h * len(chars)
             if one_col_h <= avail_h:
                 # 单列能放下
                 th = one_col_h + (draw.textbbox((0, 0), text[0] if text else " ", font=font, anchor="lt")[3] - line_h)
@@ -173,7 +175,7 @@ def fit_font_size(
         else:
             hi = mid - 1
 
-    return best
+    return max(best, 10)  # 最低 10pt 保证可读
 
 
 def draw_vertical_text(
@@ -189,31 +191,39 @@ def draw_vertical_text(
     line_spacing: float = 1.15,
     col_gap: int = 8,
 ):
-    """逐字绘制竖排文字，lt 锚点，从上到下。高度溢出时自动拆多列"""
+    """逐字绘制竖排文字，lt 锚点，从上到下。\n 表示手动列分隔"""
     x0, y0 = top_left
+
+    # \n 分隔的列优先
+    if "\n" in text:
+        columns = [list(t) for t in text.split("\n")]
+    else:
+        columns = [list(text)]
+
     ascent, descent = font.getmetrics()
     char_step = int((ascent + descent) * line_spacing)
 
     # 每字尺寸
+    all_chars = [c for col in columns for c in col]
     char_sizes = []
-    for c in text:
+    for c in all_chars:
         b = draw.textbbox((0, 0), c, font=font, anchor="lt")
         char_sizes.append((b[2], b[3]))
 
-    if not char_sizes:
+    if not char_sizes or not columns:
         return
     char_w = max(s[0] for s in char_sizes)
 
-    # 计算需要多少列
-    one_col_h = char_step * len(text)
-    if max_h and one_col_h > max_h:
-        col_h = max_h
-        chars_per_col = max(1, max_h // char_step)
-        num_cols = (len(text) + chars_per_col - 1) // chars_per_col
-    else:
-        col_h = one_col_h
-        chars_per_col = len(text)
-        num_cols = 1
+    # 自动拆列（仅当没有手动 \n 且单列溢出时）
+    if len(columns) == 1 and max_h:
+        one_col_h = char_step * len(columns[0])
+        if one_col_h > max_h:
+            chars_per_col = max(1, max_h // char_step)
+            flat = columns[0]
+            columns = [flat[i:i + chars_per_col] for i in range(0, len(flat), chars_per_col)]
+
+    num_cols = len(columns)
+    col_h = max_h if max_h else char_step * max(len(col) for col in columns)
 
     total_w = num_cols * char_w + (num_cols - 1) * col_gap
 
@@ -221,20 +231,28 @@ def draw_vertical_text(
     if max_w and total_w < max_w:
         x0 += (max_w - total_w) // 2
 
+    # 建立字符到尺寸的索引
+    char_idx = 0
+    char_size_map = {}
+    for col_chars in columns:
+        for c in col_chars:
+            char_size_map[(columns.index(col_chars), col_chars.index(c))] = char_sizes[char_idx]
+            char_idx += 1
+
     for col in range(num_cols):
-        start_idx = col * chars_per_col
-        col_text = text[start_idx:start_idx + chars_per_col]
+        col_chars = columns[col]
 
         # 日文竖排从右到左：最后一列在最右边
         col_x = x0 + (num_cols - 1 - col) * (char_w + col_gap)
 
         # 垂直居中
-        col_total_h = char_step * (len(col_text) - 1) + (char_sizes[min(start_idx, len(char_sizes)-1)][1])
-        cy = y0 + (col_h - col_total_h) // 2 if max_h else y0
+        col_total_h = char_step * (len(col_chars) - 1) + (char_sizes[sum(len(columns[c]) for c in range(col))][1] if col_chars else 0)
+        cy = y0 + (col_h - col_total_h) // 2 if max_h and col_h > col_total_h else y0
 
-        for j, char in enumerate(col_text):
-            idx = start_idx + j
-            cw = char_sizes[idx][0]
+        for j, char in enumerate(col_chars):
+            # 找该字符在扁平列表中的索引对应的尺寸
+            flat_idx = sum(len(columns[c]) for c in range(col)) + j
+            cw = char_sizes[flat_idx][0] if flat_idx < len(char_sizes) else char_w
             cx = col_x + (char_w - cw) // 2
 
             if outline_width > 0:
@@ -320,13 +338,9 @@ def _wrap_text(draw, text: str, font, max_w: int) -> List[str]:
 
 
 def _draw_outlined_text(draw, text, font, x, y, fill, ow, ofill, anchor="lt"):
-    """描边文字"""
-    for dx in range(-ow, ow + 1):
-        for dy in range(-ow, ow + 1):
-            if dx == 0 and dy == 0:
-                continue
-            draw.text((x + dx, y + dy), text, font=font, fill=ofill, anchor=anchor)
-    draw.text((x, y), text, font=font, fill=fill, anchor=anchor)
+    """描边文字 — 使用 Pillow 原生 stroke"""
+    draw.text((x, y), text, font=font, fill=fill,
+              stroke_width=ow, stroke_fill=ofill, anchor=anchor)
 
 
 def _draw_horizontal_rotated(draw, lines, font, fill, ow, ofill,
@@ -491,7 +505,7 @@ def render(
 
         # 颜色
         fill_rgb = hex_to_rgb(trans.color)
-        outline_width = max(1, font_size // 10) if trans.outline else 0
+        outline_width = max(1, font_size // 15) if trans.outline else 0
         outline_rgb = hex_to_rgb(trans.outline_color)
 
         ids_str = f"bboxes={bbox_ids}" if len(bbox_ids) > 1 else f"bbox_id={trans.bbox_id}"

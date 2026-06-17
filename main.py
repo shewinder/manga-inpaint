@@ -295,6 +295,7 @@ async def inpaint_and_render(
     bboxes: str = Form(""),
     data_id: str = Form(""),
     font_dir: str = Form(""),
+    debug: str = Form(""),
 ):
     """擦除指定 bbox 并嵌字"""
     if file.content_type and not file.content_type.startswith("image/"):
@@ -374,6 +375,27 @@ async def inpaint_and_render(
     ) for b in all_bboxes]
     do_render(inpainted_path, render_bboxes, translations_obj, output_path, fd)
 
+    # Debug：在渲染结果上绘制 bbox 边框
+    if debug.strip() or app.state.debug:
+        from PIL import ImageDraw as PILDraw
+        debug_img = Image.open(output_path).convert("RGBA")
+        debug_draw = PILDraw.Draw(debug_img)
+        colors = ["#ff4444","#44cc44","#4488ff","#ffaa00","#ff44ff",
+                  "#44ffff","#88ff88","#ff8888","#aacc44","#cc44cc"]
+        color_idx = 0
+        for t in trans_list:
+            ids = t.get("bbox_ids") or [t.get("bbox_id", 0)]
+            color = colors[color_idx % len(colors)]
+            color_idx += 1
+            for bid in ids:
+                if bid in bbox_map:
+                    b = bbox_map[bid]
+                    debug_draw.rectangle(
+                        [b["x"], b["y"], b["x"]+b["w"], b["y"]+b["h"]],
+                        outline=color, width=2)
+                    debug_draw.text((b["x"]+2, b["y"]+2), str(bid), fill=color)
+        debug_img.convert("RGB").save(output_path)
+
     # 6. 返回
     with open(output_path, "rb") as f:
         result_b64 = base64.b64encode(f.read()).decode()
@@ -440,5 +462,15 @@ async def health():
 
 
 if __name__ == "__main__":
+    import argparse
+    p = argparse.ArgumentParser()
+    p.add_argument("--debug", action="store_true", help="debug 模式：渲染时绘制 bbox 边框")
+    args, _ = p.parse_known_args()
+    if args.debug:
+        logger.info("DEBUG 模式已启用")
+        app.state.debug = True
+    else:
+        app.state.debug = False
+
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8899)
