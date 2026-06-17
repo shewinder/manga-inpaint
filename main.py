@@ -207,7 +207,7 @@ def detect_text(image: np.ndarray) -> List[dict]:
             craft_net=craft_net,
             refine_net=refine_net,
             text_threshold=CONFIDENCE_THRESHOLD,
-            link_threshold=0.4,
+            link_threshold=0.1,
             low_text=0.4,
             cuda=True,
             long_size=1280,
