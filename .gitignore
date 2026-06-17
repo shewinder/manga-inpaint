@@ -1,9 +1,7 @@
 __pycache__/
 *.pyc
 .venv/
-test/output/
-test_*.png
-test/*_*.png
+test/
 *.pth
 *.pt
 *.safetensors
