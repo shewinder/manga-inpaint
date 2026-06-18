@@ -73,7 +73,7 @@ def determine_direction(polygon: List[List[float]]) -> str:
     w = max(xs) - min(xs)
     h = max(ys) - min(ys)
     # 竖排版（日文漫画常见）：bbox 高明显大于宽
-    if h > w * 1.5:
+    if h > w * 1.1:
         return "vertical"
     return "horizontal"
 
