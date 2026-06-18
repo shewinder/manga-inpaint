@@ -369,8 +369,9 @@ async def inpaint_and_render(
 
     # 5. 嵌字渲染
     fd = Path(font_dir) if font_dir else FONT_DIR
-    inpainted_path = "/tmp/_inpainted_temp.png"
-    output_path = "/tmp/_rendered_temp.png"
+    rid = uuid.uuid4().hex[:8]
+    inpainted_path = f"/tmp/_inpainted_{rid}.png"
+    output_path = f"/tmp/_rendered_{rid}.png"
     Image.fromarray(img_array).save(inpainted_path)
 
     # 只传 Bbox 需要的字段
