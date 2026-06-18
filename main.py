@@ -46,7 +46,9 @@ lama_model = None
 manga_ocr = None
 
 # ---- 配置 ----
-CONFIDENCE_THRESHOLD = 0.7
+CONFIDENCE_THRESHOLD = 0.8
+DEFAULT_LINK_THRESHOLD = 0.25
+app.state.link_threshold = DEFAULT_LINK_THRESHOLD
 MASK_DILATION = 6
 INPAINT_MAX_SIZE = 2048
 BASE_DIR = Path(__file__).parent
@@ -193,12 +195,13 @@ def create_mask(image_shape: tuple, bboxes: list, dilation: int = MASK_DILATION)
     return mask
 
 
-def detect_text(image: np.ndarray) -> List[dict]:
+def detect_text(image: np.ndarray, link_threshold: float = 0) -> List[dict]:
     from craft_text_detector import get_prediction, empty_cuda_cache
 
     load_craft()
 
-    logger.info(f"开始文字检测, 图片尺寸: {image.shape}")
+    lt = link_threshold if link_threshold > 0 else app.state.link_threshold
+    logger.info(f"开始文字检测, 图片尺寸: {image.shape}, link_threshold={lt}")
 
     np.array = _compat_array
     try:
@@ -207,7 +210,7 @@ def detect_text(image: np.ndarray) -> List[dict]:
             craft_net=craft_net,
             refine_net=refine_net,
             text_threshold=CONFIDENCE_THRESHOLD,
-            link_threshold=0.1,
+            link_threshold=lt,
             low_text=0.4,
             cuda=True,
             long_size=1280,
@@ -270,7 +273,10 @@ def inpaint(image: np.ndarray, bboxes: list) -> np.ndarray:
 # ---- API 端点 ----
 
 @app.post("/detect", response_model=DetectResponse)
-async def detect(file: UploadFile = File(...)):
+async def detect(
+    file: UploadFile = File(...),
+    link_threshold: str = Form(""),
+):
     """CRAFT 文字检测 — 只检测，不擦除"""
     if file.content_type and not file.content_type.startswith("image/"):
         raise HTTPException(400, "仅支持图片文件")
@@ -280,8 +286,9 @@ async def detect(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(400, f"无法读取图片: {e}")
 
+    lt = float(link_threshold) if link_threshold.strip() else 0
     img_array = np.array(image)
-    bboxes = detect_text(img_array)
+    bboxes = detect_text(img_array, link_threshold=lt)
     return DetectResponse(bboxes=[BboxOut(**b) for b in bboxes])
 
 
@@ -293,6 +300,7 @@ async def inpaint_and_render(
     data_id: str = Form(""),
     font_dir: str = Form(""),
     debug: str = Form(""),
+    link_threshold: str = Form(""),
 ):
     """擦除指定 bbox 并嵌字"""
     if file.content_type and not file.content_type.startswith("image/"):
@@ -344,7 +352,8 @@ async def inpaint_and_render(
         else:
             raise HTTPException(400, "bboxes 格式错误")
     else:
-        all_bboxes = detect_text(img_array)
+        lt = float(link_threshold) if link_threshold.strip() else 0
+        all_bboxes = detect_text(img_array, link_threshold=lt)
     # 统一 bbox 键名：OCR 返回 bbox_id，CRAFT 返回 id
     for b in all_bboxes:
         if "bbox_id" in b and "id" not in b:
@@ -404,6 +413,7 @@ async def inpaint_and_render(
 async def ocr_bboxes(
     file: UploadFile = File(...),
     bboxes: str = Form(""),
+    link_threshold: str = Form(""),
 ):
     """对指定 bbox 区域做 OCR，返回精确文字"""
     if file.content_type and not file.content_type.startswith("image/"):
@@ -424,7 +434,8 @@ async def ocr_bboxes(
         else:
             raise HTTPException(400, "bboxes 格式错误")
     else:
-        bbox_list = detect_text(np.array(image))
+        lt = float(link_threshold) if link_threshold.strip() else 0
+        bbox_list = detect_text(np.array(image), link_threshold=lt)
 
     load_ocr()
     results = []
@@ -462,12 +473,15 @@ if __name__ == "__main__":
     import argparse
     p = argparse.ArgumentParser()
     p.add_argument("--debug", action="store_true", help="debug 模式：渲染时绘制 bbox 边框")
+    p.add_argument("--link-threshold", type=float, default=DEFAULT_LINK_THRESHOLD, help=f"CRAFT link_threshold (默认: {DEFAULT_LINK_THRESHOLD})")
     args, _ = p.parse_known_args()
     if args.debug:
         logger.info("DEBUG 模式已启用")
         app.state.debug = True
     else:
         app.state.debug = False
+    app.state.link_threshold = args.link_threshold
+    logger.info(f"默认 link_threshold={app.state.link_threshold}")
 
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8899)

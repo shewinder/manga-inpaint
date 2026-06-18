@@ -189,13 +189,17 @@ def draw_vertical_text(
         return
     char_w = max(s[0] for s in char_sizes)
 
-    # 自动拆列（仅当没有手动 \n 且单列溢出时）
-    if len(columns) == 1 and max_h:
-        one_col_h = char_step * len(columns[0])
-        if one_col_h > max_h:
-            chars_per_col = max(1, max_h // char_step)
-            flat = columns[0]
-            columns = [flat[i:i + chars_per_col] for i in range(0, len(flat), chars_per_col)]
+    # 自动拆列：无论有无 \n，每列超 max_h 就拆
+    if max_h:
+        chars_per_col = max(1, max_h // char_step)
+        new_columns = []
+        for col in columns:
+            if len(col) > chars_per_col:
+                for i in range(0, len(col), chars_per_col):
+                    new_columns.append(col[i:i + chars_per_col])
+            else:
+                new_columns.append(col)
+        columns = new_columns
 
     num_cols = len(columns)
     col_h = max_h if max_h else char_step * max(len(col) for col in columns)

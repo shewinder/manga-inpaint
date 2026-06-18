@@ -5,6 +5,7 @@
   python test.py test --detect-only       # 只检测，画 bbox
   python test.py test --draw-bboxes       # 检测+擦除 + 画 bbox
   python test.py test --render            # 检测+擦除+嵌字（用模拟翻译数据）
+  python test.py test --sweep-link        # link_threshold 0.1→0.4 扫描测试
 """
 import argparse
 import base64
@@ -39,12 +40,16 @@ def draw_bboxes_on_image(image: Image.Image, bboxes: list, output_path: Path):
     image.save(output_path, "PNG")
 
 
-def detect(path: Path) -> list | None:
-    """调用 /detect"""
+def detect(path: Path, link_threshold: float = 0) -> list | None:
+    """调用 /detect，可选指定 link_threshold"""
     with open(path, "rb") as f:
+        data = {}
+        if link_threshold > 0:
+            data["link_threshold"] = str(link_threshold)
         r = requests.post(
             f"{SERVICE_URL}/detect",
             files={"file": (path.name, f, f"image/{path.suffix.lstrip('.')}")},
+            data=data,
             timeout=300,
         )
     if r.status_code != 200:
@@ -94,12 +99,77 @@ def make_mock_translations(bboxes: list) -> list:
     return result
 
 
+def sweep_link_threshold(images: list, output_dir: Path):
+    """link_threshold 0.1→0.4 扫描测试"""
+    import numpy as np
+
+    thresholds = [round(x, 2) for x in np.arange(0.10, 0.41, 0.05)]
+    summary = {}
+
+    print(f"link_threshold 扫描: {thresholds}")
+    print(f"图片: {len(images)} 张")
+    print("-" * 60)
+
+    for img_path in images:
+        name = img_path.stem
+        summary[name] = {}
+        src_img = Image.open(img_path).convert("RGB")
+
+        for lt in thresholds:
+            tag = f"link{lt:.2f}"
+            print(f"  {img_path.name}  lt={lt:.2f}", end=" ", flush=True)
+
+            bboxes = detect(img_path, link_threshold=lt)
+            if bboxes is None:
+                print("✗")
+                summary[name][tag] = {"error": True}
+                continue
+
+            # 统计
+            areas = [b["w"] * b["h"] for b in bboxes]
+            ratios = [b["w"] / max(b["h"], 1) for b in bboxes]
+            summary[name][tag] = {
+                "count": len(bboxes),
+                "areas": areas,
+                "ratios": [round(r, 3) for r in ratios],
+                "avg_area": round(sum(areas) / max(len(areas), 1)),
+                "size_range": f"{min(bboxes, key=lambda b: b['w']*b['h'])['w']}x{min(bboxes, key=lambda b: b['w']*b['h'])['h']} ~ {max(bboxes, key=lambda b: b['w']*b['h'])['w']}x{max(bboxes, key=lambda b: b['w']*b['h'])['h']}",
+            }
+            print(f"→ {len(bboxes)} bbox", flush=True)
+
+            # 画 bbox 图
+            out_img = src_img.copy()
+            draw_bboxes_on_image(out_img, bboxes, output_dir / f"{name}_{tag}_bboxes.png")
+
+    # 保存汇总 JSON
+    summary_path = output_dir / "sweep_summary.json"
+    with open(summary_path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, ensure_ascii=False, indent=2)
+    print(f"\n汇总: {summary_path}")
+
+    # 打印对比表
+    print("\n" + "=" * 80)
+    print(f"{'图片':<12}", end="")
+    for lt in thresholds:
+        print(f"lt={lt:.2f}  ", end=" ")
+    print()
+    for name, data in summary.items():
+        print(f"{name:<12}", end="")
+        for lt in thresholds:
+            tag = f"link{lt:.2f}"
+            cnt = data[tag].get("count", "?")
+            print(f"{str(cnt):>6}  ", end=" ")
+        print()
+    print("=" * 80)
+
+
 def main():
     parser = argparse.ArgumentParser(description="manga-inpaint 批量测试")
     parser.add_argument("dir", nargs="?", default="test", help="测试目录 (默认: test)")
     parser.add_argument("--detect-only", action="store_true", help="只检测，不擦除")
     parser.add_argument("--draw-bboxes", action="store_true", help="在图上绘制 bbox")
     parser.add_argument("--render", action="store_true", help="擦除+嵌字（模拟翻译）")
+    parser.add_argument("--sweep-link", action="store_true", help="link_threshold 0.1→0.4 扫描，画所有 bbox")
     args = parser.parse_args()
 
     test_dir = Path(args.dir)
@@ -120,6 +190,13 @@ def main():
 
     output_dir = test_dir / "output"
     output_dir.mkdir(exist_ok=True)
+
+    if args.sweep_link:
+        print(f"测试目录: {test_dir} ({len(images)} 张)")
+        print(f"模式: link_threshold 扫描 0.1→0.4")
+        print(f"服务: {SERVICE_URL}")
+        sweep_link_threshold(images, output_dir)
+        return
 
     mode = []
     if args.detect_only:
