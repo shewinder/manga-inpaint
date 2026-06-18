@@ -7,4 +7,3 @@ test/
 *.safetensors
 *.bin
 models/
-fonts/
